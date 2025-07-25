@@ -7,9 +7,11 @@
 -- put lastfm.conf in ~/.config/mpv/script-opts/
 -- put https://github.com/hauzer/scrobbler somewhere in your PATH
 -- run `scrobbler add-user` and follow the instructions
--- create a shortcut for overrides in input.conf if you want to use that feature (e.g., O script-binding scrobble/create-override)
+-- create a shortcut for overrides in input.conf if you want to use this feature (e.g., O script-binding scrobble/create-override)
+
 -- TODO(squero): LOVE TRACK /w uosc support!!
 -- TODO(squero): skip scrobbling current track with a key press (what about now-playing?)
+-- TODO(squero): Support video formats for music videos (partially)
 
 local mp = require 'mp'
 local utils = require 'mp.utils'
@@ -23,7 +25,8 @@ local options = {
     artist_blacklist = "change artist_blacklist in script-opts/lastfm.conf",
     track_blacklist = "change track_blacklist in script-opts/lastfm.conf",
     fuzzy_metadata_search = "change fuzzy_metadata_search in script-opts/lastfm.conf",
-    enforce_overrides = false
+    enforce_overrides = false,
+    only_album_artist = "change only_album_artist in script-opts/lastfm.conf"
 }
 
 read_options(options, 'lastfm')
@@ -117,7 +120,9 @@ function get_meta_table(property)
         local m = {}
         for i = 0, mp.get_property(property .. "/list/count") - 1 do
             local p = property .. "/list/"..i.."/"
-            m[mp.get_property(p.."key")] = mp.get_property(p.."value")
+            local key = mp.get_property(p.."key")
+            local value = mp.get_property(p.."value")
+            if key then m[key:lower()] = value end
         end
         return m
     end
@@ -135,17 +140,46 @@ function subprocess(args)
     if not res.error then
         return res.stdout
     else
-        msg.error("Error getting data from stdout")
+        mp.msg.error("Error getting data from stdout: " .. tostring(res.error))
         return
     end
 end
 
+local artist, album, title, length, song_play_time, last_playing_track, tim
+
+local function get_scrobble_args(command, artist, title, album, length, song_play_time)
+    local args = { "scrobbler", command }
+    if album and #album > 0 then
+        table.insert(args, "--album=" .. album)
+    end
+    if length then
+        local len_num = tonumber(length)
+        if len_num then
+            table.insert(args, "--duration=" .. math.floor(len_num) .. "s")
+        end
+    end
+    table.insert(args, "--")
+    table.insert(args, options.username)
+    table.insert(args, artist)
+    table.insert(args, title)
+    if song_play_time then
+        table.insert(args, song_play_time)
+    end
+    return args
+end
+
 -- Function to scrobble the current track
 local function scrobble()
-    mp.msg.info(string.format("Scrobbling current track: %s - %s [%s]", artist, title, album))
-    mp.osd_message(string.format("Scrobbling current track: %s - %s [%s]", artist, title, album))
+    mp.msg.info(string.format("Scrobbling current track: %s - %s [%s]", tostring(artist), tostring(title), tostring(album)))
+    mp.osd_message(string.format("Scrobbling current track: %s - %s [%s]", tostring(artist), tostring(title), tostring(album)))
 
-    local result = subprocess({ "scrobbler", "scrobble", string.format("--album=%s", album), string.format("--duration=%ds", length), "--", options.username, artist, title, song_play_time })
+    if options.username:find("change username") then
+        mp.msg.error("Username not configured in script-opts/lastfm.conf!")
+        return
+    end
+
+    local args = get_scrobble_args("scrobble", artist, title, album, length, song_play_time)
+    local result = subprocess(args)
 
     if not result or #result == 0 then
         mp.msg.error("Scrobble command failed: No output received.")
@@ -181,21 +215,28 @@ function enqueue() -- Implement blacklisting here
         elseif #options.track_blacklist > 0 then
             if scrobble_blacklist_check(title, parseCSV(options.track_blacklist)) then return end
         end
-        if tim then tim.kill(tim) end
-        if length then
-            timeout = math.min(240, length / (100 / tonumber(options.scrobble_threshold)))
+        if tim then tim:kill() end
+        
+        local threshold = tonumber(options.scrobble_threshold) or 50
+        local len_num = tonumber(length)
+        if len_num and len_num > 0 then
+            timeout = math.min(240, len_num / (100 / threshold))
         else
             timeout = 240
         end
-        if last_playing_track ~= artist .. title then 
-            mp.msg.info(string.format("Now playing: %s - %s [%s]", artist, title, album))
-            mp.osd_message(string.format("Now playing: %s - %s [%s]", artist, title, album))
-            local result = subprocess({ "scrobbler", "now-playing", string.format("--album=%s", album), string.format("--duration=%ds", length), "--", options.username, artist, title })
+        
+        mp.msg.info(string.format("Now playing: %s - %s [%s]", tostring(artist), tostring(title), tostring(album)))
+        mp.osd_message(string.format("Now playing: %s - %s [%s]", tostring(artist), tostring(title), tostring(album)))
+        
+        if not options.username:find("change username") then
+            local args = get_scrobble_args("now-playing", artist, title, album, length)
+            subprocess(args)
         end
+
         last_playing_track = artist .. title
         tim = mp.add_timeout(timeout, scrobble)
     else
-        mp.msg.error("No metadata was found.")
+        mp.msg.error("Metadata missing (artist or title), cannot enqueue scrobble.")
     end
 end
 
@@ -283,19 +324,24 @@ function modify_metadata(override_json)
 end
 
 function new_track(name)
+    -- Kill any existing timer and reset state for the new track
+    if tim then tim:kill() end
+    artist, album, title, length, song_play_time = nil, nil, nil, nil, nil
+
     local path = mp.get_property("path")
     local filename = mp.get_property("filename")
     local filename_no_ext = mp.get_property("filename/no-ext")
+    local filtered_metadata = get_meta_table("filtered-metadata")
+    local metadata = get_meta_table("metadata")
+
     skip_path_check = nil
 
     if filename == nil then
         return
     end
 
-
     if skip_path_check ~= filename then
         if #options.scrobble_paths > 0 then
-    
             track_path = get_absolute_path(path, filename)
             local scrobble_paths = parseCSV(options.scrobble_paths)
     
@@ -307,20 +353,23 @@ function new_track(name)
 
             skip_path_check = filename
         end
-
     end
+
     -- Mark the scrobble time of the track
     song_play_time = os.date("%Y-%m-%d.%H:%M")
 
     file_extension = get_file_extension(filename)
 
-    --options.enforce_overrides
+    -- options.enforce_overrides
     local override_file = filename_no_ext .. ".override"
-    local files_in_directory = utils.readdir(track_path, "files")
+    local track_dir = get_absolute_path(path, filename)
+    local files_in_directory = utils.readdir(track_dir, "files")
     if table_includes(files_in_directory, override_file) then
-        local file_content = read_file(override_file)
-        override_json = utils.parse_json(file_content)
-        modify_metadata(override_json)
+        local file_content = read_file(track_dir .. "/" .. override_file)
+        if file_content then
+            override_json = utils.parse_json(file_content)
+            if override_json then modify_metadata(override_json) end
+        end
     end
 
     -- fuzzy_metadata_search
@@ -335,7 +384,7 @@ function new_track(name)
         end
     end
 
-    if file_extension == "cue" then
+    if file_extension == "cue" or file_extension == "mkv" then
         local chapter_count = tonumber(mp.get_property("chapter-list/count"))
         local chapter_index = mp.get_property("chapter")
         if chapter_index == nil then
@@ -347,7 +396,7 @@ function new_track(name)
         end
         chapter_index = tonumber(chapter_index)
 
-        if override_json then
+        if override_json and override_json["chapters"] then
             modify_metadata(override_json["chapters"][tostring(chapter_index)])
         end
 
@@ -361,9 +410,10 @@ function new_track(name)
             length = duration - this_chapter_starts
         end
         chapter_metadata = get_meta_table("chapter-metadata")
-        title = chapter_metadata["title"]
-        artist = chapter_metadata["performer"] and chapter_metadata["performer"] or artist
-        filtered_metadata = get_meta_table("filtered-metadata")
+        if chapter_metadata then
+            title = chapter_metadata["title"] or title
+            artist = chapter_metadata["performer"] or artist
+        end
 
         if not artist and filtered_metadata == nil then
             mp.msg.error("No metadata was found.")
@@ -372,22 +422,23 @@ function new_track(name)
 
         if filtered_metadata ~= nil then
             if not artist then
-                artist = filtered_metadata["Artist"]
+                artist = filtered_metadata["artist"]
             end
             if not album then
-                album = filtered_metadata["Album"]
+                album = filtered_metadata["album"]
             end
         end
 
         if override_json then
             if (override_json["enforce_overrides"] == "yes") or (override_json["enforce_overrides"] == "default" and options.enforce_overrides) then
                 modify_metadata(override_json)
-                modify_metadata(override_json["chapters"][tostring(chapter_index)])
+                if override_json["chapters"] then
+                    modify_metadata(override_json["chapters"][tostring(chapter_index)])
+                end
             end
         end
     else
         length = mp.get_property("duration")
-        local metadata = get_meta_table("metadata")
     
         if metadata == nil and not override_json then
             -- mp.msg.error("No metadata was found.")
@@ -400,27 +451,24 @@ function new_track(name)
             album = nil
         else
             if length and tonumber(length) < 30 then return end -- last.fm doesn't allow scrobbling short tracks
-            artist = metadata["artist"]
-            if not artist then
-                artist = metadata["Artist"]
+            artist = filtered_metadata and filtered_metadata["artist"] or artist
+            album_artist = filtered_metadata and (filtered_metadata["album_artist"] or filtered_metadata["album artist"])
+
+            if album_artist then
+                if #options.only_album_artist > 0 then
+                    if options.only_album_artist == "yes" or options.only_album_artist == "must" then
+                        artist = album_artist
+                    end
+                end
+            else
+                if options.only_album_artist == "must" then
+                    mp.msg.warn("The Album_Artist metadata was not found, Mustn't scrobble.")
+                    return
+                end
             end
-            if not artist then
-                artist = metadata["ARTIST"]
-            end
-            album = metadata["album"]
-            if not album then
-                album = metadata["Album"]
-            end
-            if not album then
-                album = metadata["ALBUM"]
-            end
-            title = metadata["title"]
-            if not title then
-                title = metadata["Title"]
-            end
-            if not title then
-                title = metadata["TITLE"]
-            end
+
+            album = filtered_metadata and filtered_metadata["album"] or album
+            title = filtered_metadata and filtered_metadata["title"] or title
         end
         if override_json then
             if (override_json["enforce_overrides"] == "yes") or (override_json["enforce_overrides"] == "default" and options.enforce_overrides) then
@@ -495,6 +543,6 @@ end
 -- mp.observe_property("metadata/list/count", nil, new_track)
 mp.register_event("file-loaded", new_track)
 mp.observe_property("chapter", nil, new_track)
--- mp.register_event("playback-restart", on_restart)
+mp.register_event("playback-restart", on_restart)
 mp.observe_property("pause", "bool", on_pause_change)
 mp.add_key_binding(nil, 'create-override', create_override)
