@@ -1,9 +1,9 @@
 # Last.fm Scrobbler for MPV Player
 
-Forked from `https://github.com/MugoSquero/mpv_scrobbler` with significant robustness and feature improvements.
+Forked from `https://github.com/MugoSquero/mpv_scrobbler` with some feature improvements.
 
 ## Key Improvements in this Fork
-- **Improved Robustness**: Fixed multiple bugs that caused the script to crash (e.g., missing album metadata, subprocess failures, undefined error handlers).
+- **Improved Robustness**: Fixed multiple bugs that caused the script to crash.
 - **Loop/Repeat Support**: Fully supports scrobbling when a track is set to loop (`--loop-file` or `--loop-playlist`).
 - **Ghost Scrobble Prevention**: Improved state management ensures metadata from a previous track never "leaks" into the next scrobble if metadata is missing.
 - **Case-Insensitive Metadata**: Metadata keys are now normalized, ensuring tags like `artist` and `Artist` are both recognized.
@@ -30,9 +30,11 @@ The scrobbler is configured using `script-opts/lastfm.conf`. Key options include
 - **username**: Your Last.fm username.
 - **scrobble_paths**: Comma-separated list of folders/paths to whitelist for scrobbling.
 - **scrobble_threshold**: Percentage of track to play before scrobbling (default: 50).
-- **scrobbler_path**: Path to the `scrobbler` executable. Supports `~/` (e.g., `~/.local/bin/scrobbler`).
+- **scrobbler_path**: Path to the `scrobbler` executable. Supports `~/` (e.g., `~/.local/bin/scrobbler`). **Highly recommended if you launch mpv from scripts or UI managers.**
 - **fuzzy_metadata_search**: Try to extract artist/album from filename if tags are missing.
 - **only_album_artist**: Whether to prioritize Album Artist tags.
+
+> **Note on PATH issues**: If you launch `mpv` from a script (e.g., Rofi, desktop entry), it may not inherit your terminal's `PATH` (like `~/.local/bin`). This will cause scrobbling to fail silently. To fix this, explicitly set the `scrobbler_path` in your `lastfm.conf`.
 
 Refer to the documented [lastfm.conf](lastfm.conf) for all options.
 
