@@ -26,10 +26,18 @@ local options = {
     track_blacklist = "change track_blacklist in script-opts/lastfm.conf",
     fuzzy_metadata_search = "change fuzzy_metadata_search in script-opts/lastfm.conf",
     enforce_overrides = false,
-    only_album_artist = "change only_album_artist in script-opts/lastfm.conf"
+    only_album_artist = "change only_album_artist in script-opts/lastfm.conf",
+    scrobbler_path = "scrobbler"
 }
 
 read_options(options, 'lastfm')
+
+local function expand_path(path)
+    if path == nil or path == "" then return "scrobbler" end
+    return mp.command_native({"expand-path", path})
+end
+
+local scrobbler_binary = expand_path(options.scrobbler_path)
 
 function trim(s)
     return s:match("^%s*(.-)%s*$")
@@ -148,7 +156,7 @@ end
 local artist, album, title, length, song_play_time, last_playing_track, tim
 
 local function get_scrobble_args(command, artist, title, album, length, song_play_time)
-    local args = { "scrobbler", command }
+    local args = { scrobbler_binary, command }
     if album and #album > 0 then
         table.insert(args, "--album=" .. album)
     end

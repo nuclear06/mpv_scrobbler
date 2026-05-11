@@ -1,48 +1,50 @@
-fork from `https://github.com/MugoSquero/mpv_scrobbler`
-fix some bug will cause script crashed
-
 # Last.fm Scrobbler for MPV Player
 
-## Project Description
-This project is a Last.fm scrobbler designed for the MPV media player. It enables users to scrobble tracks played in MPV to their Last.fm account.
+Forked from `https://github.com/MugoSquero/mpv_scrobbler` with significant robustness and feature improvements.
+
+## Key Improvements in this Fork
+- **Improved Robustness**: Fixed multiple bugs that caused the script to crash (e.g., missing album metadata, subprocess failures, undefined error handlers).
+- **Loop/Repeat Support**: Fully supports scrobbling when a track is set to loop (`--loop-file` or `--loop-playlist`).
+- **Ghost Scrobble Prevention**: Improved state management ensures metadata from a previous track never "leaks" into the next scrobble if metadata is missing.
+- **Case-Insensitive Metadata**: Metadata keys are now normalized, ensuring tags like `artist` and `Artist` are both recognized.
+- **Configurable Binary Path**: Supports custom paths for the `scrobbler` executable via `scrobbler_path` (with `~/` expansion support).
 
 ## Installation
-1. **Download the Repository**: Clone or download the repository from GitHub.
-2. **Copy Files**: Place the `scrobble` folder into the MPV scripts directory and the `last.fm` folder into the script options directory:
-   - **For Windows**: 
-     - Copy `scrobble` to `C:\Users\<YourUsername>\AppData\Roaming\mpv\scripts\`
-     - Copy `last.fm` to `C:\Users\<YourUsername>\AppData\Roaming\mpv\script-opts\`
+1. **Download the Repository**: Clone or download this repository.
+2. **Copy Files**:
    - **For Unix/Linux**: 
-     - Copy `scrobble` to `~/.config/mpv/scripts/`
-     - Copy `last.fm` to `~/.config/mpv/script-opts/`
-3. **Run the Following Command**: After placing the files, run the following command* to add your Last.fm user:
-	\*You need to have [hauzer/scrobbler](https://github.com/hauzer/scrobbler) in your PATH for this script to work
-
-   ```
+     - Copy the `scrobble` folder to `~/.config/mpv/scripts/`
+     - Copy `lastfm.conf` to `~/.config/mpv/script-opts/`
+   - **For Windows**: 
+     - Copy the `scrobble` folder to `C:\Users\<YourUsername>\AppData\Roaming\mpv\scripts\`
+     - Copy `lastfm.conf` to `C:\Users\<YourUsername>\AppData\Roaming\mpv\script-opts\`
+3. **Dependency**: Ensure you have [hauzer/scrobbler](https://github.com/hauzer/scrobbler) installed and available in your PATH (or configure its path in `lastfm.conf`).
+4. **Authenticate**: Run the following command to link your Last.fm account:
+   ```bash
    scrobbler add-user
    ```
 
 ## Configuration
-The scrobbler is configured using a file named `lastfm.conf`. Below are the key configuration options:
+The scrobbler is configured using `script-opts/lastfm.conf`. Key options include:
 
-- **username**: Your Last.fm username. Run `scrobbler add-user` to set this up.
-- **scrobble_paths**: A comma-separated list of file paths or folders from which to scrobble media. Only tracks from these paths will be scrobbled.
-- **scrobble_threshold**: The percentage of a track that must be played before it is scrobbled (e.g., 50 for halfway).
-- **artist_blacklist**: A comma-separated list of artists whose tracks should not be scrobbled.
-- **track_blacklist**: A comma-separated list of track titles that should not be scrobbled.
-- **fuzzy_metadata_search**: Controls whether to perform a fuzzy search for artist and album names based on the filename. Options are `yes`, `no`, or `cue`.
-- **enforce_overrides**: If set to `yes`, metadata from a separate `.override` file will take precedence over other sources.
-- **only_album_artist**: This setting determines whether to include featured artists in the scrobble. Options are `yes`, `no`, or `must`.
+- **username**: Your Last.fm username.
+- **scrobble_paths**: Comma-separated list of folders/paths to whitelist for scrobbling.
+- **scrobble_threshold**: Percentage of track to play before scrobbling (default: 50).
+- **scrobbler_path**: Path to the `scrobbler` executable. Supports `~/` (e.g., `~/.local/bin/scrobbler`).
+- **fuzzy_metadata_search**: Try to extract artist/album from filename if tags are missing.
+- **only_album_artist**: Whether to prioritize Album Artist tags.
 
-For more information, read the example [lastfm.conf](lastfm.conf) file, as everything is well documented there.
+Refer to the documented [lastfm.conf](lastfm.conf) for all options.
 
 ## Usage
-1. Have the [hauzer/scrobbler](https://github.com/hauzer/scrobbler) in your PATH
-2. Go through the installation as mentioned earlier.
-3. Configure the script to your liking.
-4. After completing everything, the script should scrobble tracks automatically.
+Once installed and authenticated, the script runs automatically in the background when you play music in mpv.
 
-To utilize the override feature, create a shortcut in your `input.conf`:
+### Metadata Overrides
+To manually correct metadata for a specific file, you can use the override feature. Add this to your `input.conf`:
 ```
 O script-binding scrobble/create-override
 ```
+Pressing `O` will create a `.override` JSON template next to the current file.
+
+## License
+MIT
