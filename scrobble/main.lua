@@ -90,13 +90,13 @@ function is_absolute_path(path)
     return false
 end
 
-function get_absolute_path(path, filename)
+function get_absolute_path(path, filename, working_dir)
     local absolute_path = nil
 
     if is_absolute_path(path) then
         absolute_path = path
     else
-        absolute_path = normalize_path(mp.get_property("working-directory") .. "/" .. mp.get_property("path"))
+        absolute_path = (working_dir or ".") .. "/" .. path
     end
 
     return remove_substring(absolute_path, filename)
@@ -124,9 +124,10 @@ function createFile(path, filename, content)
 end
 
 function get_meta_table(property)
-    if mp.get_property(property .. "/list/count") then
+    local count = mp.get_property_number(property .. "/list/count")
+    if count and count > 0 then
         local m = {}
-        for i = 0, mp.get_property(property .. "/list/count") - 1 do
+        for i = 0, count - 1 do
             local p = property .. "/list/"..i.."/"
             local key = mp.get_property(p.."key")
             local value = mp.get_property(p.."value")
@@ -134,7 +135,7 @@ function get_meta_table(property)
         end
         return m
     end
-    return
+    return nil
 end
 
 function subprocess(args)
@@ -142,13 +143,20 @@ function subprocess(args)
         name = "subprocess",
         args = args,
         playback_only = false,
-        capture_stdout = true
+        capture_stdout = true,
+        capture_stderr = true
     }
     local res = mp.command_native(cmd)
     if not res.error then
-        return res.stdout
+        if res.status ~= 0 then
+            mp.msg.error("Subprocess failed with status " .. tostring(res.status))
+            if res.stderr and #res.stderr > 0 then
+                mp.msg.error("Subprocess stderr: " .. res.stderr)
+            end
+        end
+        return res.stdout, res.stderr, res.status
     else
-        mp.msg.error("Error getting data from stdout: " .. tostring(res.error))
+        mp.msg.error("Error executing subprocess: " .. tostring(res.error))
         return
     end
 end
@@ -187,12 +195,12 @@ local function scrobble()
     end
 
     local args = get_scrobble_args("scrobble", artist, title, album, length, song_play_time)
-    local result = subprocess(args)
+    local stdout, stderr, status = subprocess(args)
 
-    if not result or #result == 0 then
-        mp.msg.error("Scrobble command failed: No output received.")
+    if status == 0 then
+        mp.msg.info("Scrobble successful: " .. (stdout or ""))
     else
-        mp.msg.info("Scrobble command executed successfully: " .. result)
+        mp.msg.error("Scrobble failed. Status: " .. tostring(status))
     end
 end
 
@@ -223,10 +231,13 @@ function enqueue() -- Implement blacklisting here
         elseif #options.track_blacklist > 0 then
             if scrobble_blacklist_check(title, parseCSV(options.track_blacklist)) then return end
         end
-        if tim then tim:kill() end
+        if tim then 
+            tim:kill() 
+        end
         
         local threshold = tonumber(options.scrobble_threshold) or 50
         local len_num = tonumber(length)
+        local timeout
         if len_num and len_num > 0 then
             timeout = math.min(240, len_num / (100 / threshold))
         else
@@ -255,6 +266,11 @@ function on_pause_change(name, value)
 
     if value == false and tim then
         tim:resume() -- resume the timer when played
+        
+        if artist and title and not options.username:find("change username") then
+            local args = get_scrobble_args("now-playing", artist, title, album, length)
+            subprocess(args)
+        end
     end
 end
 
@@ -278,7 +294,7 @@ function scrobble_whitelist_check(track_path, scrobble_paths)
             goto continue
         end
         if is_absolute_path(ipath) then
-            if not starts_with(track_path, normalize_path(ipath)) then
+            if not starts_with(track_path, ipath) then
                 goto continue
             else
                 should_scrobble = true
@@ -318,39 +334,48 @@ function read_file(filePath)
 end
 
 function modify_metadata(override_json)
-    if #override_json["artist"] > 0 then
+    if not override_json then return end
+    if override_json["artist"] and #override_json["artist"] > 0 then
         artist = override_json["artist"]
     end
 
-    if #override_json["album"] > 0 then
+    if override_json["album"] and #override_json["album"] > 0 then
         album = override_json["album"]
     end
 
-    if #override_json["title"] > 0 then
+    if override_json["title"] and #override_json["title"] > 0 then
         title = override_json["title"]
     end
 end
 
 function new_track(name)
-    -- Kill any existing timer and reset state for the new track
-    if tim then tim:kill() end
-    artist, album, title, length, song_play_time = nil, nil, nil, nil, nil
-
+    -- PRE-FETCH ALL PROPERTIES AT ONCE TO AVOID DEADLOCKS
     local path = mp.get_property("path")
     local filename = mp.get_property("filename")
     local filename_no_ext = mp.get_property("filename/no-ext")
+    local working_dir = mp.get_property("working-directory")
+    local duration = mp.get_property_number("duration")
+    local chapter_count = mp.get_property_number("chapter-list/count")
+    local chapter_index = mp.get_property_number("chapter")
     local filtered_metadata = get_meta_table("filtered-metadata")
     local metadata = get_meta_table("metadata")
+    local chapter_metadata = get_meta_table("chapter-metadata")
 
-    skip_path_check = nil
+    -- Kill any existing timer and reset state for the new track
+    if tim then 
+        tim:kill() 
+    end
+    artist, album, title, length, song_play_time = nil, nil, nil, nil, nil
 
     if filename == nil then
         return
     end
 
+    -- Pre-calculate track_dir and track_path using pre-fetched properties
+    local track_path = get_absolute_path(path, filename, working_dir)
+
     if skip_path_check ~= filename then
         if #options.scrobble_paths > 0 then
-            track_path = get_absolute_path(path, filename)
             local scrobble_paths = parseCSV(options.scrobble_paths)
     
             -- Check if media path is in whitelist
@@ -369,10 +394,11 @@ function new_track(name)
     file_extension = get_file_extension(filename)
 
     -- options.enforce_overrides
-    local override_file = filename_no_ext .. ".override"
-    local track_dir = get_absolute_path(path, filename)
+    local override_file = (filename_no_ext or "unknown") .. ".override"
+    local track_dir = track_path -- Since get_absolute_path returns dir path
+    
     local files_in_directory = utils.readdir(track_dir, "files")
-    if table_includes(files_in_directory, override_file) then
+    if files_in_directory and table_includes(files_in_directory, override_file) then
         local file_content = read_file(track_dir .. "/" .. override_file)
         if file_content then
             override_json = utils.parse_json(file_content)
@@ -393,31 +419,28 @@ function new_track(name)
     end
 
     if file_extension == "cue" or file_extension == "mkv" then
-        local chapter_count = tonumber(mp.get_property("chapter-list/count"))
-        local chapter_index = mp.get_property("chapter")
-        if chapter_index == nil then
+        if chapter_index == nil or chapter_index == -1 then
             return
         end
-
-        if chapter_index == -1 or chapter_index == "-1" then
-            return
-        end
-        chapter_index = tonumber(chapter_index)
 
         if override_json and override_json["chapters"] then
             modify_metadata(override_json["chapters"][tostring(chapter_index)])
         end
 
-        if chapter_index+1 < chapter_count then
-            local next_chapter_starts = mp.get_property(string.format("chapter-list/%d/time", chapter_index+1))
-            local this_chapter_starts = mp.get_property(string.format("chapter-list/%d/time", chapter_index))
-            length = next_chapter_starts - this_chapter_starts
-        else
-            local duration = mp.get_property("duration")
-            local this_chapter_starts = mp.get_property(string.format("chapter-list/%d/time", chapter_index))
-            length = duration - this_chapter_starts
+        if chapter_count and chapter_index+1 < chapter_count then
+            -- Note: chapter-list/N/time still needs a call, but it's less likely to deadlock than base properties
+            local next_chapter_starts = mp.get_property_number(string.format("chapter-list/%d/time", chapter_index+1))
+            local this_chapter_starts = mp.get_property_number(string.format("chapter-list/%d/time", chapter_index))
+            if next_chapter_starts and this_chapter_starts then
+                length = next_chapter_starts - this_chapter_starts
+            end
+        elseif duration then
+            local this_chapter_starts = mp.get_property_number(string.format("chapter-list/%d/time", chapter_index))
+            if this_chapter_starts then
+                length = duration - this_chapter_starts
+            end
         end
-        chapter_metadata = get_meta_table("chapter-metadata")
+
         if chapter_metadata then
             title = chapter_metadata["title"] or title
             artist = chapter_metadata["performer"] or artist
@@ -446,10 +469,9 @@ function new_track(name)
             end
         end
     else
-        length = mp.get_property("duration")
+        length = duration
     
         if metadata == nil and not override_json then
-            -- mp.msg.error("No metadata was found.")
             return
         end
     
@@ -488,9 +510,9 @@ function new_track(name)
 end
 
 function on_restart()
-    audio_pts = mp.get_property("audio-pts")
+    audio_pts = mp.get_property_number("audio-pts")
     -- FIXME a better check for -loop'ing tracks
-    if ((not audio_pts) or (tonumber(audio_pts) < 1)) then
+    if ((not audio_pts) or (audio_pts < 1)) then
         new_track()
     end
 end
@@ -511,7 +533,7 @@ function create_override()
     local path = mp.get_property("path")
     local filename = mp.get_property("filename")
     local filename_no_ext = mp.get_property("filename/no-ext")
-    local override_file = filename_no_ext .. ".override"
+    local working_dir = mp.get_property("working-directory")
 
     if filename == nil then
         mp.msg.error("No file has been loaded. Please try again in a moment")
@@ -519,7 +541,7 @@ function create_override()
     end
 
     local file_extension = get_file_extension(filename)
-    local absolute_path = get_absolute_path(path, filename)
+    local absolute_path = get_absolute_path(path, filename, working_dir)
 
     -- Create the JSON-like table
     local override = {
@@ -531,16 +553,18 @@ function create_override()
 
     -- Only include chapters if the file extension is "cue"
     if file_extension == "cue" then
-        local chapter_count = tonumber(mp.get_property("chapter-list/count"))
+        local chapter_count = mp.get_property_number("chapter-list/count")
         override.chapters = {}
         
         -- Populate the chapters based on the chapter count
-        for i = 0, chapter_count - 1 do
-            override.chapters[tostring(i)] = {
-                artist = "",
-                album = "",
-                title = ""
-            }
+        if chapter_count then
+            for i = 0, chapter_count - 1 do
+                override.chapters[tostring(i)] = {
+                    artist = "",
+                    album = "",
+                    title = ""
+                }
+            end
         end
     end
 
