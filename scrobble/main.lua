@@ -138,7 +138,17 @@ function get_meta_table(property)
     return nil
 end
 
-function subprocess(args)
+function log_to_file(msg)
+    local log_path = mp.command_native({"expand-path", "~~/lastfm.log"})
+    local f = io.open(log_path, "a")
+    if f then
+        f:write(os.date("%Y-%m-%d %H:%M:%S") .. " " .. msg .. "\n")
+        f:close()
+    end
+    mp.msg.info(msg)
+end
+
+function subprocess_async(args, callback)
     local cmd = {
         name = "subprocess",
         args = args,
@@ -146,19 +156,22 @@ function subprocess(args)
         capture_stdout = true,
         capture_stderr = true
     }
-    local res = mp.command_native(cmd)
-    if not res.error then
-        if res.status ~= 0 then
-            mp.msg.error("Subprocess failed with status " .. tostring(res.status))
-            if res.stderr and #res.stderr > 0 then
-                mp.msg.error("Subprocess stderr: " .. res.stderr)
-            end
+    mp.command_native_async(cmd, function(success, res, error)
+        if not success or res == nil then
+            local err_msg = "Error executing subprocess: " .. tostring(error)
+            log_to_file(err_msg)
+            if callback then callback(nil, nil, -1, err_msg) end
+            return
         end
-        return res.stdout, res.stderr, res.status
-    else
-        mp.msg.error("Error executing subprocess: " .. tostring(res.error))
-        return
-    end
+        if res.status ~= 0 then
+            local err_msg = "Subprocess failed with status " .. tostring(res.status)
+            if res.stderr and #res.stderr > 0 then
+                err_msg = err_msg .. " | stderr: " .. res.stderr
+            end
+            log_to_file(err_msg)
+        end
+        if callback then callback(res.stdout, res.stderr, res.status, nil) end
+    end)
 end
 
 local artist, album, title, length, song_play_time, last_playing_track, tim
@@ -186,22 +199,23 @@ end
 
 -- Function to scrobble the current track
 local function scrobble()
-    mp.msg.info(string.format("Scrobbling current track: %s - %s [%s]", tostring(artist), tostring(title), tostring(album)))
-    mp.osd_message(string.format("Scrobbling current track: %s - %s [%s]", tostring(artist), tostring(title), tostring(album)))
+    local log_msg = string.format("Scrobbling current track: %s - %s [%s]", tostring(artist), tostring(title), tostring(album))
+    log_to_file(log_msg)
+    mp.osd_message(log_msg)
 
     if options.username:find("change username") then
-        mp.msg.error("Username not configured in script-opts/lastfm.conf!")
+        log_to_file("Username not configured in script-opts/lastfm.conf!")
         return
     end
 
     local args = get_scrobble_args("scrobble", artist, title, album, length, song_play_time)
-    local stdout, stderr, status = subprocess(args)
-
-    if status == 0 then
-        mp.msg.info("Scrobble successful: " .. (stdout or ""))
-    else
-        mp.msg.error("Scrobble failed. Status: " .. tostring(status))
-    end
+    subprocess_async(args, function(stdout, stderr, status, err_msg)
+        if status == 0 then
+            log_to_file("Scrobble successful: " .. (stdout or ""))
+        else
+            log_to_file("Scrobble failed. Status: " .. tostring(status))
+        end
+    end)
 end
 
 function scrobble_blacklist_check(metadata, blacklist)
@@ -249,7 +263,13 @@ function enqueue() -- Implement blacklisting here
         
         if not options.username:find("change username") then
             local args = get_scrobble_args("now-playing", artist, title, album, length)
-            subprocess(args)
+            subprocess_async(args, function(stdout, stderr, status, err_msg)
+                if status == 0 then
+                    log_to_file("Initial now-playing sent successfully")
+                else
+                    log_to_file("Initial now-playing failed. Status: " .. tostring(status))
+                end
+            end)
         end
 
         last_playing_track = artist .. title
@@ -269,7 +289,13 @@ function on_pause_change(name, value)
         
         if artist and title and not options.username:find("change username") then
             local args = get_scrobble_args("now-playing", artist, title, album, length)
-            subprocess(args)
+            subprocess_async(args, function(stdout, stderr, status, err_msg)
+                if status == 0 then
+                    log_to_file("Resume now-playing sent successfully")
+                else
+                    log_to_file("Resume now-playing failed. Status: " .. tostring(status))
+                end
+            end)
         end
     end
 end
